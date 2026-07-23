@@ -1,6 +1,7 @@
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import type { DataKey, GlowUpData, SyncMeta } from '@/types';
 import { TABLE_NAMES } from '@/types';
+import { nowIso } from '@/lib/utils';
 
 // ============================================================================
 // Moteur de synchronisation "local-first".
@@ -140,6 +141,64 @@ export async function pullAllData(userId: string): Promise<GlowUpData | null> {
   });
 
   return data as GlowUpData;
+}
+
+function normalizeRowsForImport<K extends DataKey>(key: K, rows: GlowUpData[K], userId: string) {
+  return (rows as unknown as Array<Record<string, unknown>>).map((row) => ({
+    ...row,
+    user_id: typeof row.user_id === 'string' && row.user_id ? row.user_id : userId,
+    created_at: row.created_at ?? nowIso(),
+    updated_at: row.updated_at ?? nowIso(),
+    deleted_at: row.deleted_at ?? null,
+  }));
+}
+
+export async function importDataToCloud(userId: string, next: GlowUpData) {
+  if (!isSupabaseConfigured) {
+    return { success: false, error: 'Supabase n\'est pas configuré.' };
+  }
+
+  const { data: authData, error: authError } = await supabase.auth.getUser();
+  if (authError || !authData.user?.id) {
+    return { success: false, error: 'Tu n\'es pas connecté à Supabase. Reconnecte-toi puis réessaie.' };
+  }
+
+  const effectiveUserId = authData.user.id;
+  const entries = Object.entries(TABLE_NAMES) as [DataKey, string][];
+  let importedCount = 0;
+  const failures: string[] = [];
+
+  try {
+    for (const [key, table] of entries) {
+      const rows = normalizeRowsForImport(key, next[key], effectiveUserId);
+
+      for (const row of rows) {
+        const { error } = await supabase.from(table).upsert(
+          { ...row, user_id: effectiveUserId },
+          { onConflict: 'id' }
+        );
+
+        if (error) {
+          failures.push(`${table}: ${error.message}`);
+          console.error(`[GlowUp] Import cloud impossible pour ${table}`, error);
+        } else {
+          importedCount += 1;
+        }
+      }
+    }
+
+    if (importedCount === 0) {
+      return {
+        success: false,
+        error: failures[0] ?? 'Aucune donnée n\'a pu être enregistrée en ligne.',
+      };
+    }
+
+    return { success: true, importedCount };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Échec de l\'import en ligne.';
+    return { success: false, error: message };
+  }
 }
 
 /** Fusionne deux jeux de données par updated_at le plus récent, ligne par ligne. */

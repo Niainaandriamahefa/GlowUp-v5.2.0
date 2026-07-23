@@ -5,11 +5,12 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input, Label, Select } from '@/components/ui/Field';
 import { LogOut, RefreshCw, Database, Wifi, WifiOff, Download, Upload, Moon, Sun, Image as ImageIcon, Mail } from 'lucide-react';
-import type { Currency } from '@/types';
+import type { Currency, GlowUpData } from '@/types';
 import { CURRENCY_LABEL, formatAmount } from '@/lib/currency';
 import { supabase } from '@/lib/supabase';
 import { computeScore, weekRangeFor } from '@/lib/bilan';
 import { todayISO } from '@/lib/utils';
+import { importDataToCloud } from '@/services/syncEngine';
 
 const CHANGELOG = [
   { version: '5.2.0-beta', date: '2026-07-20', notes: [
@@ -58,9 +59,11 @@ export default function SettingsPage() {
   const [currencySaved, setCurrencySaved] = useState(false);
   const [email, setEmail] = useState(user?.email ?? '');
   const [emailMsg, setEmailMsg] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const localFileInputRef = useRef<HTMLInputElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const [importMsg, setImportMsg] = useState<string | null>(null);
+  const [isImportingToCloud, setIsImportingToCloud] = useState(false);
+  const [hasLocalImportReadyForCloud, setHasLocalImportReadyForCloud] = useState(false);
 
   async function handleAvatarChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -100,23 +103,51 @@ export default function SettingsPage() {
     URL.revokeObjectURL(url);
   }
 
-  function handleImportClick() {
-    fileInputRef.current?.click();
+  function handleLocalImportClick() {
+    localFileInputRef.current?.click();
+  }
+
+  async function handleSaveToCloud() {
+    if (!user || !isConfigured) {
+      setImportMsg('Pour enregistrer en ligne, connecte-toi et vérifie la configuration Supabase.');
+      return;
+    }
+
+    if (!hasLocalImportReadyForCloud) {
+      setImportMsg('Importe d’abord un fichier localement pour pouvoir l’enregistrer en ligne.');
+      return;
+    }
+
+    setIsImportingToCloud(true);
+    const result = await importDataToCloud(user.id, data);
+    setIsImportingToCloud(false);
+
+    if (!result.success) {
+      setImportMsg(result.error ?? 'Échec de l\'enregistrement en ligne.');
+      return;
+    }
+
+    setHasLocalImportReadyForCloud(false);
+    setImportMsg('Enregistrement en ligne réussi ! Les données ont été envoyées vers la base Supabase.');
   }
 
   async function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+
     try {
       const text = await file.text();
       const parsed = JSON.parse(text);
       const incoming = parsed.data ?? parsed;
-      replaceAll(incoming);
-      setImportMsg('Import réussi ! Tes données locales ont été remplacées.');
+
+      replaceAll(incoming as GlowUpData);
+      setHasLocalImportReadyForCloud(true);
+      setImportMsg('Import local réussi ! Tu peux maintenant les enregistrer en ligne avec le bouton ci-dessous.');
     } catch {
       setImportMsg("Le fichier n'a pas pu être lu. Vérifie qu'il s'agit bien d'un export GlowUp (.json).");
+    } finally {
+      e.target.value = '';
     }
-    e.target.value = '';
   }
 
   return (
@@ -248,10 +279,13 @@ export default function SettingsPage() {
           <Button variant="secondary" onClick={handleExport}>
             <Download size={15} /> Exporter (.json)
           </Button>
-          <Button variant="secondary" onClick={handleImportClick}>
-            <Upload size={15} /> Importer (.json)
+          <Button variant="secondary" onClick={handleLocalImportClick}>
+            <Upload size={15} /> Importer localement
           </Button>
-          <input ref={fileInputRef} type="file" accept="application/json" className="hidden" onChange={handleImportFile} />
+          <Button variant="primary" onClick={handleSaveToCloud} disabled={isImportingToCloud || !isConfigured || !hasLocalImportReadyForCloud}>
+            <Upload size={15} /> {isImportingToCloud ? 'Enregistrement…' : 'Enregistrer en ligne'}
+          </Button>
+          <input ref={localFileInputRef} type="file" accept="application/json" className="hidden" onChange={handleImportFile} />
         </div>
         {importMsg && <p className="mt-2 text-xs text-[var(--color-text-muted)]">{importMsg}</p>}
       </Card>
